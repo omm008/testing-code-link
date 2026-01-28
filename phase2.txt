@@ -1,0 +1,422 @@
+Phase 2: Multi-Tenant Backend Implementation ✅
+Overview
+Successfully built a production-ready multi-tenant Express.js backend that supports the Tech Provider architecture with dynamic credential routing, real-time wallet billing, and intelligent webhook routing.
+
+📦 Delivered Files
+Core Services
+config/supabase.js
+
+Supabase client with service role key
+Bypasses RLS for system operations
+services/channelService.js
+
+Get organization's WhatsApp credentials
+Route webhooks by phone_number_id
+Update channel status
+services/walletService.js
+
+Deduct service fee (with balance check)
+Add credits (recharge/refund)
+Get balance
+Refund failed transactions
+services/whatsappService.js
+
+Send messages via Meta API
+Handle text & media messages
+Robust Meta error handling
+Refund logic for failed sends
+services/messageService.js
+
+Save inbound/outbound messages
+Find or create contacts
+Proper org isolation
+Controllers
+controllers/messageController.js
+
+/api/send-message endpoint
+Dynamic credential resolution
+Pre-send wallet check
+Automatic refund on failure
+controllers/webhookController.js
+
+/webhook endpoints (GET/POST)
+Intelligent routing by phone_number_id
+Auto-reply with wallet deduction
+Multi-tenant message handling
+Main Application
+index-multitenant.js
+Express server setup
+Route definitions
+Error handling middleware
+Logging
+Documentation
+README_MULTITENANT.md
+
+Complete API documentation
+Testing guide
+Troubleshooting
+Migration guide
+.env.example
+
+Updated environment template
+No hardcoded tokens needed
+🏗️ Architecture
+Service Layer Design
+┌─────────────────────────────────────────────────┐
+│           Message Controller                     │
+│  - Send message API                              │
+│  - Credential resolution                         │
+│  - Wallet & refund logic                         │
+└────────────┬────────────────────────────────────┘
+             │
+   ┌─────────┴─────────┬─────────────┬─────────────┐
+   │                   │             │             │
+┌──▼────────────┐ ┌────▼────────┐ ┌─▼──────────┐ ┌▼────────────┐
+│ Channel Service│ │Wallet Service│ │WhatsApp Svc│ │Message Svc  │
+│ - Get creds    │ │ - Deduct fee │ │ - Meta API │ │ - Save msgs │
+│ - Route webhook│ │ - Refunds    │ │ - Errors   │ │ - Contacts  │
+└────────────────┘ └──────────────┘ └────────────┘ └─────────────┘
+         │                │               │              │
+         └────────────────┴───────────────┴──────────────┘
+                          │
+                  ┌───────▼────────┐
+                  │   Supabase DB  │
+                  │  - Multi-tenant│
+                  │  - RLS enabled │
+                  └────────────────┘
+Request Flow: Send Message
+1. Frontend → POST /api/send-message
+   {
+     org_id: "uuid-123",
+     phone: "+919876543210",
+     message: "Hello"
+   }
+2. Message Controller
+   ↓ channelService.getActiveChannel(org_id)
+   ← { access_token, phone_number_id, service_fee_per_msg: 0.20 }
+3. Wallet Check
+   ↓ walletService.deductServiceFee(org_id, 0.20)
+   ← true/false (insufficient balance returns 402)
+4. Send to WhatsApp
+   ↓ whatsappService.sendMessage({access_token, phone_number_id, ...})
+   ← Meta API response or error
+5. If Error & Was Deducted
+   ↓ walletService.refundServiceFee(org_id, 0.20, reason)
+   ← Refund completed
+6. Save to Database
+   ↓ messageService.saveOutboundMessage({org_id, ...})
+   ← Message saved with org isolation
+7. Response to Frontend
+   ← 200: Success | 402: No funds | 500: Error
+Webhook Flow: Inbound Message
+1. Meta → POST /webhook
+   {
+     metadata: { phone_number_id: "123456" },
+     messages: [{ from: "91xxx", text: { body: "Hi" } }]
+   }
+2. Webhook Controller
+   ↓ channelService.findOrgByPhoneNumberId("123456")
+   ← { org_id: "uuid-acme", service_fee: 0.20 }
+3. Route to Correct Org
+   ✅ Message belongs to Acme Corp (org_id: uuid-acme)
+4. Find/Create Contact
+   ↓ messageService.findOrCreateContact(phone, org_id)
+   ← Contact object
+5. Save Inbound Message
+   ↓ messageService.saveInboundMessage({org_id, contact_id, ...})
+   ← Saved with Acme's org_id (isolated from other orgs)
+6. Check Auto-Reply Rules
+   ↓ Query automation_rules WHERE org_id = uuid-acme
+   ← Match found: "hi" → "Welcome to Acme!"
+7. Deduct Fee & Send Reply
+   ↓ walletService.deductServiceFee(uuid-acme, 0.20)
+   ↓ whatsappService.sendMessage(reply)
+   ← Auto-reply sent
+8. Response to Meta
+   ← 200 OK (immediately)
+🚀 Key Features Implemented
+1. Dynamic Credential Resolution ✅
+Problem: Old backend used hardcoded WA_TOKEN and WA_PHONE_NUMBER_ID
+
+Solution: Fetch credentials dynamically per organization
+
+// Before (Single-tenant)
+const token = process.env.WA_TOKEN;
+// After (Multi-tenant)
+const channel = await channelService.getActiveChannel(org_id);
+const token = channel.access_token;  // Unique per org
+Benefits:
+
+Support unlimited organizations
+Each client uses their own WhatsApp account
+Meta bills client directly
+You charge only service fee
+2. Pre-Send Wallet Check ✅
+Flow:
+
+// 1. Check balance BEFORE API call
+const deducted = await walletService.deductServiceFee(org_id, 0.20);
+if (!deducted) {
+  return res.status(402).json({ error: "Insufficient credits" });
+}
+// 2. Now send message
+await whatsappService.sendMessage({...});
+Database Function Used:
+
+-- Atomic operation with row locking
+SELECT deduct_service_fee(org_id, amount, description);
+Result:
+
+No message sent if insufficient balance
+No wasted Meta API calls
+Clean billing
+3. Intelligent Webhook Routing ✅
+Challenge: How to route incoming messages to correct organization?
+
+Solution: Use phone_number_id as routing key
+
+// Extract from webhook
+const phoneNumberId = change.metadata.phone_number_id;
+// Query channels table
+const channel = await channelService.findOrgByPhoneNumberId(phoneNumberId);
+// Save with correct org_id
+await messageService.saveInboundMessage({
+  orgId: channel.org_id,  // ← Perfect isolation
+  ...
+});
+Why this works:
+
+phone_number_id is unique per WhatsApp account
+Stored in channels table with org_id
+Instant lookup without ambiguity
+4. Automatic Refund Logic ✅
+When refunds happen:
+
+Meta API errors (token expired, rate limit)
+Network failures
+Service unavailable
+Implementation:
+
+try {
+  // Deduct fee
+  await walletService.deductServiceFee(org_id, 0.20);
+  
+  // Send message
+  await whatsappService.sendMessage({...});
+} catch (error) {
+  // Check if refundable error
+  if (whatsappService.shouldRefund(error)) {
+    await walletService.refundServiceFee(org_id, 0.20, error.message);
+  }
+}
+Refundable Errors:
+
+Invalid access token
+Token expired
+Rate limit exceeded
+Temporary errors
+Network errors
+Non-refundable:
+
+Invalid phone number (customer's fault)
+Message rejected by WhatsApp
+🔐 Data Isolation
+Scenario: 3 Organizations
+Org	WhatsApp Number	phone_number_id	Org UUID
+Acme Corp	+1-555-0001	123456	uuid-acme
+Beta Inc	+1-555-0002	789012	uuid-beta
+Gamma LLC	+1-555-0003	345678	uuid-gamma
+When Acme Sends Message
+POST /api/send-message
+{
+  org_id: "uuid-acme",
+  phone: "+919876543210",
+  message: "Hi from Acme"
+}
+Backend:
+
+Fetches Acme's credentials (phone_number_id: 123456)
+Uses Acme's access_token
+Deducts from Acme's wallet
+Saves to messages table with org_id = uuid-acme
+Result: Message belongs to Acme, isolated from Beta and Gamma
+
+When Beta Receives Message
+Meta Webhook:
+{
+  "metadata": { "phone_number_id": "789012" },
+  "messages": [{ "from": "91xxx", "text": { "body": "Reply to Beta" } }]
+}
+Backend:
+
+Looks up phone_number_id: 789012 → org_id: uuid-beta
+Saves message with org_id = uuid-beta
+Checks Beta's automation rules (not Acme's)
+Deducts from Beta's wallet (if auto-reply)
+Result: Complete isolation - Beta's data separate from Acme
+
+🧪 Testing Scenarios
+Test 1: Send Message (Happy Path)
+Setup:
+
+-- Ensure org has channel & balance
+UPDATE wallets SET balance = 100.00 WHERE org_id = 'your-org-uuid';
+Request:
+
+curl -X POST http://localhost:3000/api/send-message \
+  -H "Content-Type: application/json" \
+  -d '{
+    "org_id": "your-org-uuid",
+    "phone": "919876543210",
+    "message": "Test from multi-tenant backend"
+  }'
+Expected: ✅ Balance: ₹100.00 → ₹99.80
+✅ Message sent via WhatsApp
+✅ Saved in messages with org_id
+✅ Transaction recorded
+
+Test 2: Insufficient Balance
+Setup:
+
+UPDATE wallets SET balance = 0.10 WHERE org_id = 'your-org-uuid';
+Request: Same as Test 1
+
+Expected: ❌ Message NOT sent
+❌ Balance unchanged (still ₹0.10)
+Response: 402 - "Insufficient wallet balance"
+
+Test 3: Webhook Routing
+Simulate: Send WhatsApp message to your number
+
+Expected: ✅ Webhook received
+✅ Correct org_id identified
+✅ Contact created/updated
+✅ Message saved with org_id
+✅ Auto-reply sent (if rule matches)
+
+Test 4: Refund on Failure
+Simulate: Temporarily use invalid access token
+
+Expected: ✅ Fee deducted initially
+❌ Meta API call fails
+✅ Fee REFUNDED automatically
+✅ Refund transaction recorded
+Response: 500 - "Message failed to send (refunded)"
+
+📊 Database Changes Needed
+The backend expects these columns in database tables:
+
+Messages Table
+-- Add if not exists
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS org_id UUID REFERENCES organizations(id);
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS channel_id UUID REFERENCES channels(id);
+Contacts Table
+ALTER TABLE contacts ADD COLUMN IF NOT EXISTS org_id UUID REFERENCES organizations(id);
+Automation Rules Table
+ALTER TABLE automation_rules ADD COLUMN IF NOT EXISTS org_id UUID REFERENCES organizations(id);
+Note: These were already added in Phase 1 migration!
+
+🔄 Migration Steps
+1. Deploy Database Migration (Phase 1)
+If not done yet, run:
+
+-- Execute: 001_multi_tenant_migration.sql
+2. Update Environment Variables
+Add to 
+.env
+:
+
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+3. Deploy Backend Code
+# On Render/production
+git push origin main
+# Update start command to:
+node index-multitenant.js
+4. Update Frontend
+Change API calls to include org_id:
+
+// Dashboard/AdminDashboard.jsx
+await axios.post(API_URL, {
+  org_id: currentUser.org_id,  // ← ADD THIS
+  phone: selectedContact.phone,
+  message: textToSend,
+});
+5. Test End-to-End
+Send message from dashboard
+Receive message via WhatsApp
+Verify wallet balance changes
+Check database for proper org_id
+🎯 Next Steps
+After deploying this backend:
+
+Implement WhatsApp Embedded Signup Flow
+
+Allow clients to connect their WhatsApp accounts
+Store credentials in channels table
+Build Wallet Recharge UI
+
+Integrate Razorpay/Stripe
+Call add_wallet_credits() after payment
+Add Organization Settings Page
+
+Display wallet balance
+Show connected channels
+Configure service fee
+Implement Low Balance Alerts
+
+Monitor wallet balance
+Email/SMS when balance < threshold
+Add Analytics Dashboard
+
+Total messages sent
+Service fees earned
+Wallet recharge history
+📝 Code Quality Features
+✅ Modular Architecture
+
+Services for business logic
+Controllers for request handling
+Clear separation of concerns
+✅ Error Handling
+
+Try-catch blocks everywhere
+Detailed error messages
+Meta API error parsing
+✅ Logging
+
+Request logging
+Success confirmations
+Detailed error logs
+✅ Database Best Practices
+
+Using RPC functions for atomic operations
+Proper foreign keys
+Org isolation via org_id
+✅ Security
+
+Service role key for admin operations
+RLS bypassed only when needed
+No SQL injection risks
+🎉 Summary
+What we built:
+
+✅ 5 modular services (Channel, Wallet, WhatsApp, Message, Config)
+✅ 2 controllers (Message, Webhook)
+✅ Complete multi-tenant routing
+✅ Dynamic credential resolution
+✅ Real-time wallet billing
+✅ Automatic refund logic
+✅ Intelligent webhook routing
+✅ Support for text & media messages
+✅ Auto-reply with billing
+✅ Comprehensive documentation
+Business Impact:
+
+🚀 Support unlimited organizations
+💰 Charge service fee per message
+🔐 Complete data isolation
+⚡ Real-time billing
+🛡️ Automatic refunds for failures
+📊 Full transaction audit trail
+Phase 2 Complete! 🎉
+Your backend is now a production-ready Tech Provider platform capable of serving multiple clients with their own WhatsApp accounts and prepaid wallets.
